@@ -1,0 +1,25 @@
+[package]
+name = "reckle_volatility"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.40"
+itertools = { version = "0.12.0", default-features = false, features = ["use_alloc"] }
+log = "0.4.14"
+num = { version = "0.4.0", default-features = false }
+num-traits = "0.2"
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng", "getrandom"] }
+
+plonky2 = "0.1.4"
+plonky2_crypto = { git = "https://github.com/Lagrange-Labs/plonky2-crypto", rev = "17d69309ead3e5ee0927fd264e0b9cbc31551452" }
+
+[patch.crates-io]
+plonky2 = { git = "https://github.com/Lagrange-Labs/plonky2", rev = "3205601900b02fa23e9a894e8ceba65d99258a23" }
+
+[dev-dependencies]
+env_logger = { version = "0.11.3", default-features = false }
+serde_json = "1.0"
+
+[profile.release]
+debug = false

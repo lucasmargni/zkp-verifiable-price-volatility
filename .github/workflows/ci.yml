@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C target-cpu=native"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is pinned in rust-toolchain.toml and the pin is load-bearing:
+      # the Lagrange plonky2 fork uses feature(stdsimd), removed from Rust in 2024.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Cargo.lock is committed on purpose. A fresh resolution picks up
+      # edition2024 crates that this toolchain cannot parse.
+      - name: Verify the lockfile is honoured
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Regenerate reference vectors and check they are current
+        run: |
+          python3 scripts/test_reference.py
+          python3 scripts/gen_vectors.py
+          git diff --exit-code testdata/vectors.json
+
+      - name: Test
+        run: cargo test --release --locked -- --nocapture
