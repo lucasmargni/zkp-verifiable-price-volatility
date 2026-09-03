@@ -1,3 +1,13 @@
+# Pinned dependency versions live in Cargo.lock, which is committed on purpose.
+# The toolchain is nightly-2024-01-21 (see rust-toolchain.toml) because the
+# Lagrange plonky2 fork uses feature(stdsimd), removed from Rust in mid-2024.
+# That old toolchain cannot build crates whose MSRV is newer, so several
+# transitive deps are held back: rayon 1.10.0 / rayon-core 1.12.1,
+# time 0.3.36 and its family. Do not run `cargo update`.
+# Known exception: the windows-* crates resolve to versions requiring rustc
+# 1.82 and cannot be downgraded further. They are Windows-only targets and are
+# never built on Linux or macOS, so CI is unaffected.
+
 [package]
 name = "reckle_volatility"
 version = "0.1.0"
