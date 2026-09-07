@@ -6,6 +6,11 @@
 //! makes it possible to test one against the other.
 
 pub mod aggregate;
+pub mod merkle;
+pub mod circuit_b0;
+pub mod circuit_bi;
+pub mod reckle_tree;
+pub mod baseline;
 
 /// Goldilocks modulus, the field Plonky2 works over.
 pub const P: u64 = 0xFFFF_FFFF_0000_0001;
