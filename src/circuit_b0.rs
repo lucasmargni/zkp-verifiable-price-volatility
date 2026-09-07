@@ -7,8 +7,8 @@ use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::PoseidonGoldilocksConfig;
 
+use crate::gadgets::{map_leaf_circuit, map_leaf_circuit_unchecked};
 use crate::merkle::{F, LeafData};
-use crate::{MAX_DEV, RANGE_BITS};
 
 const D: usize = 2;
 type C = PoseidonGoldilocksConfig;
@@ -35,6 +35,17 @@ pub struct B0Circuit {
 impl B0Circuit {
     /// Builds circuit B0 for processing two leaf nodes without recursion.
     pub fn new() -> Self {
+        Self::build(true)
+    }
+
+    /// Builds B0 **without** the range check. Deliberately unsound; test-only.
+    /// See `gadgets::map_leaf_circuit_unchecked`.
+    #[doc(hidden)]
+    pub fn new_unchecked() -> Self {
+        Self::build(false)
+    }
+
+    fn build(range_checked: bool) -> Self {
         let config = CircuitConfig::standard_recursion_config();
         let mut builder = CircuitBuilder::<F, D>::new(config);
 
@@ -45,26 +56,21 @@ impl B0Circuit {
         let right_index = builder.add_virtual_target();
         let right_price = builder.add_virtual_target();
 
-        let max_dev_target = builder.constant(F::from_canonical_u64(MAX_DEV));
+        // 2-3. In-circuit Map for both leaves, with the two-sided range check
+        let map = if range_checked {
+            map_leaf_circuit
+        } else {
+            map_leaf_circuit_unchecked
+        };
+        let (delta_l, delta_l_sq) = map(&mut builder, left_price, p0);
+        let (delta_r, delta_r_sq) = map(&mut builder, right_price, p0);
 
-        // 2. In-circuit Map for Left Leaf with strict 23-bit decomposition
-        let delta_l = builder.sub(left_price, p0);
-        let shifted_l = builder.add(delta_l, max_dev_target);
-        let _bits_l = builder.split_le(shifted_l, RANGE_BITS);
-        let delta_l_sq = builder.mul(delta_l, delta_l);
-
-        // 3. In-circuit Map for Right Leaf with strict 23-bit decomposition
-        let delta_r = builder.sub(right_price, p0);
-        let shifted_r = builder.add(delta_r, max_dev_target);
-        let _bits_r = builder.split_le(shifted_r, RANGE_BITS);
-        let delta_r_sq = builder.mul(delta_r, delta_r);
-
-        // 4. In-circuit Base Reduce: cnt = 2, sum = delta_l + delta_r, sumsq = delta_l_sq + delta_r_sq
+        // 4. In-circuit base Reduce
         let cnt = builder.constant(F::from_canonical_u64(2));
         let sum = builder.add(delta_l, delta_r);
         let sumsq = builder.add(delta_l_sq, delta_r_sq);
 
-        // 5. In-circuit Poseidon Hashes
+        // 5. In-circuit Poseidon hashes
         let left_hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(vec![left_index, left_price]);
         let right_hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(vec![right_index, right_price]);
 
@@ -73,7 +79,7 @@ impl B0Circuit {
         parent_inputs.extend_from_slice(&right_hash.elements);
         let parent_hash = builder.hash_n_to_hash_no_pad::<PoseidonHash>(parent_inputs);
 
-        // 6. Public Inputs: (C, P0, cnt, sum, sumsq)
+        // 6. Public inputs: (C, P0, cnt, sum, sumsq)
         builder.register_public_inputs(&parent_hash.elements);
         builder.register_public_input(p0);
         builder.register_public_input(cnt);
@@ -120,8 +126,20 @@ impl B0Circuit {
 mod tests {
     use super::*;
     use crate::merkle::hash_children;
-    use crate::to_field;
+    use crate::{to_field, MAX_DEV};
+    use plonky2::field::types::PrimeField64;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Instant;
+
+    /// A leaf is rejected if proving fails, panics during witness generation,
+    /// or yields a proof that does not verify. Any of the three counts.
+    fn is_rejected(circuit: &B0Circuit, p0: u64, left: LeafData, right: LeafData) -> bool {
+        match catch_unwind(AssertUnwindSafe(|| circuit.prove(p0, left, right))) {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(proof)) => circuit.data.verify(proof).is_err(),
+        }
+    }
 
     #[test]
     fn test_b0_completeness_and_measure_h() {
@@ -131,43 +149,97 @@ mod tests {
 
         let circuit = B0Circuit::new();
 
-        // 1. Measure witness generation and proof time (h-related benchmark baseline)
         let start = Instant::now();
         let proof = circuit.prove(p0, left, right).expect("B0 proving must succeed");
-        let proving_time = start.elapsed();
-        println!("\n[Benchmark] B0 prove time (leaf level): {:?}", proving_time);
+        println!("\n[Benchmark] B0 prove time (leaf level): {:?}", start.elapsed());
 
-        // 2. Verify proof
         let verify_start = Instant::now();
         circuit.data.verify(proof.clone()).expect("B0 verification must succeed");
         println!("[Benchmark] B0 verify time: {:?}", verify_start.elapsed());
 
-        // 3. Check public outputs
         let expected_parent_hash = hash_children(left.hash(), right.hash());
         let expected_delta_l = left.price as i64 - p0 as i64;
         let expected_delta_r = right.price as i64 - p0 as i64;
         let expected_sum = to_field(expected_delta_l + expected_delta_r);
-        let expected_sumsq = (expected_delta_l * expected_delta_l + expected_delta_r * expected_delta_r) as u64;
+        let expected_sumsq =
+            (expected_delta_l * expected_delta_l + expected_delta_r * expected_delta_r) as u64;
 
         let pis = &proof.public_inputs;
         assert_eq!(&pis[0..4], &expected_parent_hash.elements);
         assert_eq!(pis[4], F::from_canonical_u64(p0));
-        assert_eq!(pis[5], F::from_canonical_u64(2)); // cnt
+        assert_eq!(pis[5], F::from_canonical_u64(2));
         assert_eq!(pis[6], F::from_canonical_u64(expected_sum));
         assert_eq!(pis[7], F::from_canonical_u64(expected_sumsq));
     }
 
+    /// The band must be exactly [-MAX_DEV, +MAX_DEV] and symmetric. A one-sided
+    /// `split_le` would pass the first two assertions and fail the last.
     #[test]
-    #[should_panic]
-    fn test_b0_rejects_out_of_range() {
+    fn test_b0_range_check_band_is_exact_and_symmetric() {
         let p0 = 3_000_000u64;
-        let left = LeafData::new(0, p0);
-        // Exceed 23-bit budget (shifted value >= 2^23)
-        let exceeding_price = p0 + (1 << RANGE_BITS);
-        let right = LeafData::new(1, exceeding_price);
-
         let circuit = B0Circuit::new();
-        // This must panic due to unsatisfiable bit-decomposition constraints
-        let _ = circuit.prove(p0, left, right);
+        let anchor = LeafData::new(0, p0);
+
+        // Both boundaries accepted.
+        for price in [p0 + MAX_DEV, p0 - MAX_DEV] {
+            let proof = circuit
+                .prove(p0, anchor, LeafData::new(1, price))
+                .unwrap_or_else(|_| panic!("deviation of exactly MAX_DEV must be provable ({price})"));
+            circuit.data.verify(proof).expect("boundary proof must verify");
+        }
+
+        // One tick past either boundary rejected.
+        assert!(
+            is_rejected(&circuit, p0, anchor, LeafData::new(1, p0 + MAX_DEV + 1)),
+            "+MAX_DEV+1 must be rejected"
+        );
+        assert!(
+            is_rejected(&circuit, p0, anchor, LeafData::new(1, p0 - MAX_DEV - 1)),
+            "-MAX_DEV-1 must be rejected"
+        );
+    }
+
+    /// The attack the range check exists to prevent.
+    ///
+    /// With `delta = 2^32`, the true `delta^2 = 2^64` reduces to `2^32 - 1`
+    /// modulo Goldilocks. Two such leaves report `sumsq = 8_589_934_590`
+    /// instead of `2^65`, so the verifier reads a standard deviation of
+    /// 65.54 USD where the real one is 4_294_967.30 USD — a lie by a factor
+    /// of 65_536.
+    #[test]
+    fn test_b0_overflow_attack_is_blocked_by_range_check() {
+        let p0 = 3_000_000u64;
+        let delta = 1u64 << 32;
+        let attack = LeafData::new(0, p0 + delta);
+
+        // Unchecked circuit: the attack succeeds and the lie is visible.
+        let unchecked = B0Circuit::new_unchecked();
+        let proof = unchecked
+            .prove(p0, attack, LeafData::new(1, p0 + delta))
+            .expect("unchecked circuit accepts anything");
+        unchecked.data.verify(proof.clone()).expect("and the proof verifies");
+
+        let reported_sumsq = proof.public_inputs[7].to_canonical_u64();
+        let true_sumsq = 2u128 * (delta as u128) * (delta as u128);
+
+        assert_eq!(reported_sumsq, 8_589_934_590, "wrapped value");
+        assert!(
+            (true_sumsq) > crate::P as u128,
+            "the honest value must exceed the modulus for this to be an attack"
+        );
+        assert!(
+            (reported_sumsq as u128) < true_sumsq,
+            "the circuit under-reports the variance"
+        );
+        println!(
+            "\n[Soundness] unchecked circuit reports sumsq={reported_sumsq}, true value {true_sumsq}"
+        );
+
+        // Checked circuit: same witness must not produce a verifying proof.
+        let checked = B0Circuit::new();
+        assert!(
+            is_rejected(&checked, p0, attack, LeafData::new(1, p0 + delta)),
+            "the range check must block the overflow attack"
+        );
     }
 }

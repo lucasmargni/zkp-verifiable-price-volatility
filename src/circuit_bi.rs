@@ -118,6 +118,7 @@ mod tests {
     use crate::from_field;
     use crate::merkle::{hash_children, LeafData};
     use plonky2::field::types::PrimeField64;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Instant;
 
     #[test]
@@ -177,5 +178,96 @@ mod tests {
         assert_eq!(pis[5].to_canonical_u64(), 4); // cnt = 4
         assert_eq!(from_field(pis[6].to_canonical_u64()), expected_sum);
         assert_eq!(pis[7].to_canonical_u64(), expected_sumsq);
+    }
+
+    /// Section 3.3 of the paper flags that circuit `B` does not force a batch
+    /// proof to bottom out at real leaves: because `B` accepts a child digest
+    /// without knowing whether it came from a leaf or an internal node, a
+    /// prover can stop early and produce a valid proof over a truncated tree,
+    /// claiming a subset that was never in the tree. The paper proposes adding
+    /// a `leaf()` predicate but leaves the fix conditional.
+    ///
+    /// Our construction is immune, and not by accident. The attack needs one
+    /// circuit that accepts both leaves and inner proofs. We have two:
+    ///
+    ///  - `B0` consumes `(index, price)` pairs and hashes them itself. It takes
+    ///    no proof, so nothing can be substituted for a leaf.
+    ///  - `Bi` accepts only proofs verified against `vk_{i-1}`, hardcoded at
+    ///    build time (Fig. 4). Each level has a different key.
+    ///
+    /// So the height is pinned by the chain of verification keys, and a proof
+    /// from one level is not a valid input at another. This test demonstrates
+    /// that: a `B0` proof cannot pass as a `B1` proof, and a `B1` proof cannot
+    /// be verified with `B0`'s verifier data.
+    #[test]
+    fn test_truncated_tree_attack_does_not_apply() {
+        let p0 = 3_000_000u64;
+        let leaves = [
+            LeafData::new(0, 3_000_500),
+            LeafData::new(1, 2_999_250),
+            LeafData::new(2, 3_001_000),
+            LeafData::new(3, 3_000_000),
+        ];
+
+        let b0 = B0Circuit::new();
+        let p_l = b0.prove(p0, leaves[0], leaves[1]).expect("B0 left");
+        let p_r = b0.prove(p0, leaves[2], leaves[3]).expect("B0 right");
+
+        let b1 = BiCircuit::new(&b0.data.verifier_data());
+        let p1 = b1.prove(&p_l, &p_r).expect("B1 proof");
+
+        // A level-0 proof is not a level-1 proof: the shapes and the
+        // verification keys differ, so B1's verifier rejects it.
+        assert!(
+            b1.data.verify(p_l.clone()).is_err(),
+            "a B0 proof must not verify under B1"
+        );
+
+        // And a level-1 proof cannot be replayed one level down.
+        assert!(
+            b0.data.verify(p1.clone()).is_err(),
+            "a B1 proof must not verify under B0"
+        );
+
+        // Feeding a B1 proof where B1 expects B0 proofs must fail too: the
+        // circuit was built against B0's `common` data.
+        let replayed = catch_unwind(AssertUnwindSafe(|| b1.prove(&p1, &p1)));
+        let rejected = match replayed {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(bad)) => b1.data.verify(bad).is_err(),
+        };
+        assert!(rejected, "a level-1 proof must not be accepted as a child of B1");
+
+        // Sanity: the honest proof does verify.
+        b1.data.verify(p1).expect("honest B1 proof must verify");
+    }
+
+    /// `Bi` must refuse to merge two subtrees committed against different
+    /// reference prices. Without the `connect(p0_l, p0_r)` constraint a prover
+    /// could centre one half on a convenient `P0` and the other on another,
+    /// making the aggregates incomparable while the proof still verified.
+    #[test]
+    fn test_bi_rejects_mismatched_p0() {
+        let p0_a = 3_000_000u64;
+        let p0_b = 3_000_100u64;
+
+        let b0 = B0Circuit::new();
+        let left = b0
+            .prove(p0_a, LeafData::new(0, 3_000_500), LeafData::new(1, 2_999_250))
+            .expect("B0 left");
+        let right = b0
+            .prove(p0_b, LeafData::new(2, 3_001_000), LeafData::new(3, 3_000_000))
+            .expect("B0 right");
+
+        let b1 = BiCircuit::new(&b0.data.verifier_data());
+
+        let merged = catch_unwind(AssertUnwindSafe(|| b1.prove(&left, &right)));
+        let rejected = match merged {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(bad)) => b1.data.verify(bad).is_err(),
+        };
+        assert!(rejected, "subtrees with different P0 must not merge");
     }
 }

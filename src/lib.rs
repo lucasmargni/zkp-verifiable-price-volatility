@@ -7,6 +7,7 @@
 
 pub mod aggregate;
 pub mod merkle;
+pub mod gadgets;
 pub mod circuit_b0;
 pub mod circuit_bi;
 pub mod reckle_tree;

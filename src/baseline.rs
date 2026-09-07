@@ -8,8 +8,8 @@ use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
 use plonky2::plonk::config::PoseidonGoldilocksConfig;
 use plonky2::plonk::proof::ProofWithPublicInputs;
 
+use crate::gadgets::map_leaf_circuit;
 use crate::merkle::{F, LeafData};
-use crate::{MAX_DEV, RANGE_BITS};
 
 const D: usize = 2;
 type C = PoseidonGoldilocksConfig;
@@ -43,7 +43,6 @@ impl MonolithicBaselineCircuit {
         let mut builder = CircuitBuilder::<F, D>::new(config);
 
         let p0 = builder.add_virtual_target();
-        let max_dev_target = builder.constant(F::from_canonical_u64(MAX_DEV));
 
         let mut leaf_indices = Vec::with_capacity(n_leaves);
         let mut leaf_prices = Vec::with_capacity(n_leaves);
@@ -61,11 +60,8 @@ impl MonolithicBaselineCircuit {
             leaf_indices.push(idx);
             leaf_prices.push(price);
 
-            // Map: delta = price - p0
-            let delta = builder.sub(price, p0);
-            let shifted = builder.add(delta, max_dev_target);
-            let _bits = builder.split_le(shifted, RANGE_BITS);
-            let delta_sq = builder.mul(delta, delta);
+            // Map: delta = price - p0, with the two-sided range check
+            let (delta, delta_sq) = map_leaf_circuit(&mut builder, price, p0);
 
             // Accumulate
             let one = builder.one();
