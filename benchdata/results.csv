@@ -1,0 +1,15 @@
+system,n_leaves,aggregate_s,update_s,verify_ms,proof_bytes,note
+reckle,4,0.8732,0.4000,7.3134,127256,
+baseline,4,0.0140,0.0138,3.0796,77808,update = full reproof
+reckle,8,2.4812,1.1461,3.8966,132888,
+baseline,8,0.0158,0.0281,3.0598,89548,update = full reproof
+reckle,16,5.5140,1.8724,3.9012,132888,
+baseline,16,0.0325,0.0265,3.7137,94092,update = full reproof
+reckle,32,10.7995,2.5463,4.0686,132888,
+baseline,32,0.0351,0.0514,3.6304,98700,update = full reproof
+reckle,64,21.1424,3.5151,4.2333,132888,
+baseline,64,0.0520,0.0463,3.1302,103436,update = full reproof
+reckle,128,40.3632,4.1253,4.2504,132888,
+baseline,128,0.1001,0.1175,4.4889,116072,update = full reproof
+reckle,256,79.2311,5.0247,4.3111,132888,
+baseline,256,0.1724,0.1809,3.6327,121512,update = full reproof
